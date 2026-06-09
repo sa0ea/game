@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Node.js オンライン対戦版</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; }
+        body { margin: 0; padding: 0; background-color: #1a1a1a; color: #fff; font-family: 'Arial', sans-serif; overflow: hidden; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; }
+        #game-container { position: relative; width: 100%; height: 100%; max-width: 1000px; max-height: 600px; background-color: #2e4d2e; border: 4px solid #444; overflow: hidden; }
+        canvas { display: block; width: 100%; height: 100%; background-color: #3b6b3b; }
+        #ui-layer { position: absolute; top: 15px; left: 0; width: 100%; display: flex; justify-content: space-around; font-size: 20px; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); pointer-events: none; z-index: 10; }
+        .player-info { background: rgba(0,0,0,0.5); padding: 5px 15px; border-radius: 10px; }
+        #instructions { position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%); font-size: 13px; background: rgba(0,0,0,0.7); padding: 8px 16px; border-radius: 20px; pointer-events: none; text-align: center; z-index: 10; width: 80%; }
+    </style>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+
+    <div id="game-container">
+        <div id="ui-layer">
+            <div class="player-info" style="color: #3498db;">1P (青側): <span id="p1-hp">---</span></div>
+            <div style="color: #ffcc00; font-size: 24px;">ONLINE VS</div>
+            <div class="player-info" style="color: #e74c3c;">2P (赤側): <span id="p2-hp">---</span></div>
+        </div>
+        
+        <div id="instructions">
+            【Node.js リアルタイム対戦】操作：[WASD]移動 / [F]通常攻撃 / [G]特殊スキル<br>
+            別のタブや別のPCで同じURLを開くと、相手プレイヤーとして同期されます。
+        </div>
+
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 1000;
+        canvas.height = 600;
+
+        const playerImg = new Image();
+        playerImg.src = 'costume3.png';
+
+        const socket = io(); // サーバーへ接続
+
+        let myId = null;
+        let players = {};
+        let bullets = [];
+        let particles = [];
+        
+        const keys = {};
+        window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+        window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+        // --- ネットワークイベントの処理 ---
+        socket.on('init', (data) => {
+            myId = data.id;
+            players = data.playerList;
+            requestAnimationFrame(gameLoop);
+        });
+
+        socket.on('new_player', (newPlayerData) => {
+            players[newPlayerData.id] = newPlayerData;
+        });
+
+        socket.on('player_updated', (updatedPlayerData) => {
+            if (players[updatedPlayerData.id]) {
+                players[updatedPlayerData.id].x = updatedPlayerData.x;
+                players[updatedPlayerData.id].y = updatedPlayerData.y;
+                players[updatedPlayerData.id].angle = updatedPlayerData.angle;
+            }
+        });
+
+        socket.on('enemy_shoot', (bData) => {
+            bullets.push(new Bullet(bData.x, bData.y, bData.dx, bData.dy, bData.damage, bData.isP1));
+        });
+
+        socket.on('enemy_skill', (data) => {
+            triggerVisualSkill(data.attackerId);
+        });
+
+        socket.on('hp_updated', (data) => {
+            if (players[data.targetId]) {
+                players[data.targetId].hp = data.hp;
+            }
+        });
+
+        socket.on('player_left', (id) => {
+            delete players[id];
+        });
+
+        socket.on('room_full', () => {
+            alert('ルームが満員です（2人まで）。');
+        });
+
+        // --- クラス定義 ---
+        class Bullet {
+            constructor(x, y, dx, dy, damage, isP1) {
+                this.x = x; this.y = y; this.dx = dx; this.dy = dy;
+                this.damage = damage; this.isP1 = isP1;
+                this.radius = 8; this.speed = 12; this.active = true;
+            }
+            update() {
+                this.x += this.dx * this.speed;
+                this.y += this.dy * this.speed;
+                if (this.x < 0 || this.x > canvas.width || this.y < 0 || this.y > canvas.height) this.active = false;
+            }
+            draw() {
+                ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.isP1 ? '#5dade2' : '#f1948a'; ctx.fill();
+            }
+        }
+
+        function triggerVisualSkill(attackerId) {
+            const att = players[attackerId];
+            if (!att) return;
+            for (let i = 0; i < 30; i++) {
+                const pAngle = (Math.PI * 2 / 30) * i;
+                particles.push({
+                    x: att.x, y: att.y,
+                    dx: Math.cos(pAngle) * 5, dy: Math.sin(pAngle) * 5,
+                    life: 20, maxLife: 20,
+                    color: att.isPlayer1 ? 'rgba(52, 152, 219, ' : 'rgba(231, 76, 60, '
+                });
+            }
+        }
+
+        let lastAttackTime = 0;
+        let lastSkillTime = 0;
+
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 背景グリッド
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.04)'; ctx.lineWidth = 2;
+            for (let x = 0; x < canvas.width; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
+            for (let y = 0; y < canvas.height; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
+
+            // パーティクル更新
+            particles.forEach((p, index) => {
+                p.x += p.dx; p.y += p.dy; p.life--;
+                ctx.beginPath(); ctx.arc(p.x, p.y, (p.life / p.maxLife) * 16, 0, Math.PI * 2);
+                ctx.fillStyle = p.color + (p.life / p.maxLife) + ")"; ctx.fill();
+                if (p.life <= 0) particles.splice(index, 1);
+            });
+
+            // 自分(ローカルプレイヤー)の操作・移動処理
+            const me = players[myId];
+            if (me && me.hp > 0) {
+                let mx = 0, myMove = 0;
+                if (keys['w']) myMove = -1;
+                if (keys['s']) myMove = 1;
+                if (keys['a']) mx = -1;
+                if (keys['d']) mx =
